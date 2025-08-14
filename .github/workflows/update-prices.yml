@@ -1,0 +1,42 @@
+name: Update Pokemon TCG Prices
+
+on:
+  schedule:
+    - cron: "15 2 * * *"   # כל יום ב-02:15 UTC
+  workflow_dispatch:       # אפשר להריץ ידנית
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    concurrency:
+      group: tcg-price-update
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run price updater
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          POKEMON_TCG_API_KEY: ${{ secrets.POKEMON_TCG_API_KEY }}
+          # אפשר לשחק בפרמטרים בלי לגעת בקוד:
+          PAGE_SIZES: "100,50,25"
+          BETWEEN_PAGES_DELAY: "2.0"
+          POST_BATCH_DELAY: "1.0"
+          MAX_RETRIES: "4"
+          REQ_TIMEOUT: "60"
+        run: python update_prices.py
