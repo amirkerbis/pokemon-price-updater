@@ -13,6 +13,9 @@ POST_BATCH_DELAY    = float(os.getenv("POST_BATCH_DELAY", "1.0"))
 MAX_RETRIES         = int(os.getenv("MAX_RETRIES", "4"))
 REQ_TIMEOUT         = int(os.getenv("REQ_TIMEOUT", "60"))
 
+# תקציב הזמן להרצה (דקות). ברירת מחדל ~110 כדי להקדים את ה-timeout של GitHub אם מוגדר על 120
+TIME_BUDGET_MINUTES = int(os.getenv("TIME_BUDGET_MINUTES", "110"))
+
 TODAY = datetime.date.today().isoformat()
 
 # -------- Clients --------
@@ -57,10 +60,10 @@ def upsert_prices(rows: List[Dict[str, Any]]):
             return
         except Exception as e:
             if attempt == MAX_RETRIES:
-                print(f"❌ upsert failed ({len(rows)} rows): {e}")
+                print(f"❌ upsert failed ({len(rows)} rows): {e}", flush=True)
                 return
             sleep_s = 2 ** attempt
-            print(f"⏳ upsert retry {attempt}/{MAX_RETRIES} -> wait {sleep_s}s | {e}")
+            print(f"⏳ upsert retry {attempt}/{MAX_RETRIES} -> wait {sleep_s}s | {e}", flush=True)
             time.sleep(sleep_s)
 
 def set_exists_in_api(set_id: str) -> bool:
@@ -115,26 +118,26 @@ def fetch_cards_page(set_id: str, page: int) -> Tuple[List[Dict[str, Any]], str]
                     return r.json().get("data", []), "ok"
                 if r.status_code in (429, 500, 502, 503, 504):
                     sleep_s = 2 ** attempt
-                    print(f"⏳ set {set_id} page {page} size {size}: HTTP {r.status_code} -> wait {sleep_s}s")
+                    print(f"⏳ set {set_id} page {page} size {size}: HTTP {r.status_code} -> wait {sleep_s}s", flush=True)
                     time.sleep(sleep_s)
                     continue
                 if r.status_code == 404:
                     if not set_exists_in_api(set_id):
-                        print(f"⚠️ set {set_id}: confirmed not in /v2/sets → skipping this set")
+                        print(f"⚠️ set {set_id}: confirmed not in /v2/sets → skipping this set", flush=True)
                         return [], "skip"
-                    print(f"⏳ set {set_id} page {page} size {size}: HTTP 404 on cards, set exists → retry later")
+                    print(f"⏳ set {set_id} page {page} size {size}: HTTP 404 on cards, set exists → retry later", flush=True)
                     return [], "retry"
-                print(f"⏳ set {set_id} page {page} size {size}: HTTP {r.status_code} → temporary")
+                print(f"⏳ set {set_id} page {page} size {size}: HTTP {r.status_code} → temporary", flush=True)
                 return [], "retry"
             except requests.Timeout:
                 sleep_s = 2 ** attempt
-                print(f"⏳ set {set_id} page {page} size {size}: timeout -> wait {sleep_s}s")
+                print(f"⏳ set {set_id} page {page} size {size}: timeout -> wait {sleep_s}s", flush=True)
                 time.sleep(sleep_s)
             except Exception as e:
                 sleep_s = 2 ** attempt
-                print(f"⏳ set {set_id} page {page} size {size}: error {e} -> wait {sleep_s}s")
+                print(f"⏳ set {set_id} page {page} size {size}: error {e} -> wait {sleep_s}s", flush=True)
                 time.sleep(sleep_s)
-        print(f"↘️  set {set_id} page {page}: falling back from size {size}")
+        print(f"↘️  set {set_id} page {page}: falling back from size {size}", flush=True)
     return [], "retry"
 
 def get_progress(set_id: str) -> Dict[str, Any]:
@@ -159,6 +162,10 @@ def update_progress(set_id: str, page: int = None, done: bool = None):
     ).execute()
 
 def main():
+    # תקציב זמן
+    start_ts = time.time()
+    deadline  = start_ts + TIME_BUDGET_MINUTES * 60
+
     # קרא את רשימת הסטים מסופבייס
     sets = supabase.table("sets").select("id").order("id").execute().data
     set_ids = [s["id"] for s in sets]
@@ -169,18 +176,31 @@ def main():
     sets_skipped: List[str] = []
     sets_retry: List[str] = []
 
-    print("🚀 מתחיל עדכון מחירים יומי (bulk paging + resume + smart 404)…")
+    print(f"🚀 מתחיל עדכון מחירים יומי (budget={TIME_BUDGET_MINUTES}m, bulk paging + resume + smart 404)…", flush=True)
+
+    time_up = False
 
     for set_id in set_ids:
+        # אם נגמר הזמן – אל תתחיל סט חדש
+        if time.time() > deadline:
+            print("⏹ הגיע תקציב הזמן לפני התחלת סט חדש — יוצא נקי. נמשיך בהרצה הבאה.", flush=True)
+            break
+
         prog = get_progress(set_id)
         if prog["done"]:
-            print(f"⏭️  set {set_id}: כבר סומן כסיום להיום — דילוג")
+            print(f"⏭️  set {set_id}: כבר סומן כסיום להיום — דילוג", flush=True)
             continue
 
         page = (prog["last_page_done"] or 0) + 1
-        print(f"▶️ set {set_id}: ממשיך מעמוד {page}")
+        print(f"▶️ set {set_id}: ממשיך מעמוד {page}", flush=True)
 
         while True:
+            # בדיקת זמן לפני בקשה לעמוד נוסף
+            if time.time() > deadline:
+                print("⏹ הגיע תקציב הזמן באמצע סט — שומר התקדמות ויוצא. נמשיך מאותו דף בהרצה הבאה.", flush=True)
+                time_up = True
+                break
+
             cards_page, status = fetch_cards_page(set_id, page)
 
             if status == "skip":
@@ -190,13 +210,13 @@ def main():
 
             if status == "retry":
                 sets_retry.append(set_id)
-                print(f"↩️ set {set_id} page {page}: temporary failure — will retry next run")
+                print(f"↩️ set {set_id} page {page}: temporary failure — will retry next run", flush=True)
                 break
 
             if not cards_page:
                 sets_done.append(set_id)
                 update_progress(set_id, page=page-1, done=True)
-                print(f"✅ set {set_id}: הסתיים (last_page_done={page-1})")
+                print(f"✅ set {set_id}: הסתיים (last_page_done={page-1})", flush=True)
                 break
 
             batch_rows: List[Dict[str, Any]] = []
@@ -208,13 +228,16 @@ def main():
             total_rows += len(batch_rows)
 
             update_progress(set_id, page=page, done=False)
-            print(f"🟩 set {set_id} page {page}: cards={len(cards_page)} price_rows={len(batch_rows)} total_price_rows={total_rows}")
+            print(f"🟩 set {set_id} page {page}: cards={len(cards_page)} price_rows={len(batch_rows)} total_price_rows={total_rows}", flush=True)
 
             page += 1
             time.sleep(BETWEEN_PAGES_DELAY)
 
+        if time_up:
+            break
+
     # -------- Summary --------
-    print("\n================ SUMMARY ================\n")
+    print("\n================ SUMMARY ================\n", flush=True)
     try:
         res_today = supabase.table("card_prices") \
             .select("id", count="exact") \
@@ -225,7 +248,7 @@ def main():
             db_today_count = len(res_today.data or [])
     except Exception as e:
         db_today_count = None
-        print(f"ℹ️ לא הצלחתי להביא ספירת DB להיום: {e}")
+        print(f"ℹ️ לא הצלחתי להביא ספירת DB להיום: {e}", flush=True)
 
     prog_rows = supabase.table("price_run_progress") \
         .select("set_id,last_page_done,done") \
@@ -252,7 +275,7 @@ def main():
     show_list("⏭️ סטים שדולגו (לא קיימים ב-API) (skip)", sets_skipped)
     show_list("↩️ סטים שנדחו להרצה הבאה (retry)", sets_retry or list(not_done_from_db))
     show_list("⏳ סטים שנותרו להשלמה (remaining)", remaining_sets)
-    print("\n================ END SUMMARY ================\n")
+    print("\n================ END SUMMARY ================\n", flush=True)
 
 if __name__ == "__main__":
     main()
