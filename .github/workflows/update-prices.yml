@@ -2,8 +2,11 @@ name: Update Pokemon TCG Prices
 
 on:
   schedule:
-    - cron: "15 2 * * *"   # כל יום ב-02:15 UTC
-  workflow_dispatch:       # אפשר להריץ ידנית
+    - cron: "15 0 * * *"  # 00:15 UTC
+    - cron: "15 2 * * *"  # 02:15 UTC
+    - cron: "15 4 * * *"  # 04:15 UTC
+  workflow_dispatch:
+
 
 jobs:
   run:
